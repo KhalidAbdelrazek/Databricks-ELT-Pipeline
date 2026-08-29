@@ -1,0 +1,14 @@
+name: fintech_dwh
+version: '1.0.0'
+profile: fintech_dwh
+model-paths: ["models"]
+snapshot-paths: ["snapshots"]
+
+models:
+  fintech_dwh:
+    staging:
+      +schema: silver
+      +materialized: view
+    marts:
+      +schema: gold
+      +materialized: table
