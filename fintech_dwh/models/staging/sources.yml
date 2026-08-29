@@ -1,0 +1,12 @@
+version: 2
+sources:
+  - name: bronze
+    database: main
+    schema: bronze
+    tables:
+      - name: raw_customers
+      - name: raw_accounts
+      - name: raw_transactions
+      - name: raw_merchants
+      - name: raw_billers
+      - name: raw_commission_rules

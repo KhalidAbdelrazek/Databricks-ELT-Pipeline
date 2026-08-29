@@ -1,0 +1,97 @@
+version: 2
+
+models:
+  - name: stg_customers
+    columns:
+      - name: customer_id
+        tests: [unique, not_null]
+      - name: kyc_status
+        tests:
+          - accepted_values:
+              values: ['VERIFIED', 'PENDING']
+      - name: country_code
+        tests:
+          - accepted_values:
+              values: ['US', 'CA', 'GB', 'DE']
+
+  - name: stg_accounts
+    columns:
+      - name: account_id
+        tests: [unique, not_null]
+      - name: customer_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_customers')
+              field: customer_id
+      - name: account_type
+        tests:
+          - accepted_values:
+              values: ['Checking', 'Savings']
+      - name: account_status
+        tests:
+          - accepted_values:
+              values: ['Active', 'Dormant']
+      - name: currency
+        tests:
+          - accepted_values:
+              values: ['USD']
+
+  - name: stg_merchants
+    columns:
+      - name: merchant_id
+        tests: [unique, not_null]
+      - name: mcc_code
+        tests:
+          - accepted_values:
+              values: ['5411', '5812', '5732', '5999']
+      - name: country_code
+        tests:
+          - accepted_values:
+              values: ['US', 'CA', 'GB', 'DE']
+
+  - name: stg_billers
+    columns:
+      - name: biller_id
+        tests: [unique, not_null]
+      - name: biller_category
+        tests:
+          - accepted_values:
+              values: ['Electricity', 'Water', 'Internet', 'Mobile_Topup', 'Insurance', 'Education']
+      - name: country_code
+        tests:
+          - accepted_values:
+              values: ['US', 'CA', 'GB', 'DE']
+
+  - name: stg_transactions
+    columns:
+      - name: transaction_id
+        tests: [unique, not_null]
+      - name: transaction_type
+        tests:
+          - accepted_values:
+              values: ['purchase', 'bill_payment', 'transfer']
+      - name: account_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_accounts')
+              field: account_id
+      - name: merchant_id
+        tests:
+          - relationships:
+              to: ref('stg_merchants')
+              field: merchant_id
+      - name: biller_id
+        tests:
+          - relationships:
+              to: ref('stg_billers')
+              field: biller_id
+      - name: channel
+        tests:
+          - accepted_values:
+              values: ['Web', 'Mobile', 'POS', 'ATM']
+      - name: status
+        tests:
+          - accepted_values:
+              values: ['PENDING', 'SETTLED', 'DECLINED', 'CANCELLED']
