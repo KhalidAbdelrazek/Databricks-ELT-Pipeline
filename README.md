@@ -156,7 +156,7 @@ A custom `generate_schema_name` macro ensures models land in the intended `silve
 5. Connect Metabase to the Databricks SQL Warehouse, point at main.gold
 ```
 
-In production, steps 2–4 are chained into a single scheduled Databricks Workflows job — see `docs/screenshots/workflow-dag.png`.
+In production, steps 2–4 are chained into a single scheduled Databricks Workflows job — see `docs/screenshots/Orchestration.png`.
 
 ## Screenshots
 
@@ -164,10 +164,9 @@ In production, steps 2–4 are chained into a single scheduled Databricks Workfl
 |---|---|
 | **Unity Catalog structure** ![Catalog](docs/screenshots/catalog-explorer.png) | **Landing zone volume** ![Landing](docs/screenshots/landing-volume.png) |
 | **Auto Loader ingestion** ![Streaming](docs/screenshots/autoloader-streaming.png) | **dbt test suite passing** ![Tests](docs/screenshots/dbt-test-pass.png) |
-| **dbt lineage graph** ![Lineage](docs/screenshots/dbt-lineage.png) | **Orchestration DAG** ![Workflow](docs/screenshots/workflow-dag.png) |
-| **Commission rate history** ![Commission](docs/screenshots/metabase-commission.png) | **Revenue dashboard** ![Revenue](docs/screenshots/metabase-revenue.png) |
+| **dbt lineage graph** ![Lineage](docs/screenshots/dbt-lineage.png) | **Orchestration** ![Workflow](docs/screenshots/Orchestration.png) |
+| **Dashboard** ![Revenue](docs/screenshots/metabase.png) | **Dashoard** ![rest](docs/screenshots/metabase2.png) |
 
-*(Replace the paths above with your actual screenshot files under `docs/screenshots/`.)*
 
 ## Data scale
 
