@@ -1,27 +1,40 @@
-# Databricks ELT Pipeline
+# Databricks ELT Pipeline — Fintech Analytics Platform
 
-A production-style ELT project built on Azure Databricks that simulates a fintech transaction platform, loads raw data into a landing zone, ingests it into a Medallion architecture, transforms it with dbt, and exposes curated analytical models for BI reporting in Metabase.
+![Azure Databricks](https://img.shields.io/badge/Azure-Databricks-E35A2A?logo=databricks&logoColor=white)
+![Unity Catalog](https://img.shields.io/badge/Unity-Catalog-1B3A57)
+![dbt](https://img.shields.io/badge/dbt-1.12-FF694B?logo=dbt&logoColor=white)
+![PySpark](https://img.shields.io/badge/PySpark-Auto%20Loader-E25A1C?logo=apachespark&logoColor=white)
+![Metabase](https://img.shields.io/badge/Metabase-Dashboards-509EE3?logo=metabase&logoColor=white)
+![Status](https://img.shields.io/badge/status-active-brightgreen)
 
-This project demonstrates an end-to-end modern data stack workflow:
+A production-style ELT pipeline that simulates a fintech payments platform end to end: synthetic source data → medallion architecture on Unity Catalog → dbt transformations with SCD2 history tracking → live BI dashboards in Metabase. Built entirely on Azure Databricks Serverless — no clusters to manage, no local install required.
 
-* Synthetic data generation for core fintech entities
-* Incremental ingestion from a landing zone into Bronze
-* Data standardization and quality checks in Silver
-* Dimensional modeling and revenue aggregates in Gold
-* Reporting consumption through Metabase dashboards and reports
+![Architecture](docs/screenshots/architecture-diagram.png)
 
-## Project overview
+## Table of contents
 
-The pipeline models a fintech payments environment with customers, accounts, merchants, billers, commission rules, and transactions. It combines Databricks notebooks for ingestion/orchestration with a dbt project for transformations and testing.
+- [Why this project](#why-this-project)
+- [Architecture](#architecture)
+- [Data model](#data-model)
+- [Technology stack](#technology-stack)
+- [Repository structure](#repository-structure)
+- [Pipeline stages](#pipeline-stages)
+- [Data quality](#data-quality)
+- [How to run](#how-to-run)
+- [Screenshots](#screenshots)
+- [Data scale](#data-scale)
+- [Engineering notes](#engineering-notes)
+- [Roadmap](#roadmap)
 
-At a high level, the project flow is:
+## Why this project
 
-1. Provision the catalog, schemas, and landing volume
-2. Generate historical and incremental raw datasets into the landing zone
-3. Load raw files into Bronze tables using Auto Loader-style streaming ingestion and merge logic
-4. Transform Bronze data into Silver staging models with dbt
-5. Build Gold dimensions, facts, snapshots, and aggregate marts with dbt
-6. Connect the curated Gold layer to Metabase for reporting and business insights
+Most portfolio ELT demos stop at "generate some fake rows and load them into a table." This one goes further, on purpose:
+
+- **Three real transaction types**, not one — purchases, bill payments, and account-to-account transfers, each with domain-correct nulls (a transfer has no `merchant_id`; an ATM withdrawal has no `ip_address`).
+- **A real transaction lifecycle** — transactions land `PENDING` and resolve to `SETTLED` / `DECLINED` / `CANCELLED` over subsequent runs, exactly like a real payments system, instead of being static rows.
+- **SCD2 commission history via dbt snapshots** — the source system only ever exposes the *current* fee schedule; dbt reconstructs the full rate history (`dbt_valid_from` / `dbt_valid_to`) automatically, and only ~12% of rules reprice on any given day, not all of them at once.
+- **Upsert-correct Bronze ingestion** — Auto Loader streams new files cheaply, but a `MERGE` keyed on the natural business ID keeps Bronze at exactly one current row per entity, instead of accumulating duplicate history for every profile update or status change.
+- **A full year of realistic backfilled history**, not everything crammed onto a single day, with statuses that make sense for their age (a transaction from six months ago is never still "pending").
 
 ## Architecture
 
@@ -35,22 +48,34 @@ Bronze: raw ingestion tables in main.bronze
 Silver: cleaned staging models in main.silver
         |
         v
-Gold: dimensions, fact tables, snapshots, and aggregates in main.gold
+Gold: dimensions, fact tables, snapshots, and aggregate marts in main.gold
         |
         v
-Metabase: dashboards, reporting, and business analytics
+Metabase: models, metrics, dashboards, and public reporting
 ```
+
+Orchestrated as a single Databricks Workflows job (generator → bronze ingestion → dbt), scheduled to run automatically every 6 hours, entirely on Serverless compute.
+
+## Data model
+
+| Entity | Type | Notes |
+|---|---|---|
+| `customers` | Dimension | ~100K seeded, grows daily with new signups + profile updates |
+| `accounts` | Dimension | ~150K seeded, linked to customers, status flips (Active/Dormant) |
+| `merchants` | Dimension | Static reference, MCC-coded |
+| `billers` | Dimension | Static reference, category-coded (utilities, telecom, insurance...) |
+| `commission_rules` | Mutable source → dbt snapshot | Current fee schedule; dbt reconstructs full history |
+| `transactions` | Fact | Polymorphic: `purchase` / `bill_payment` / `transfer`, full lifecycle |
+
+Every transaction carries exactly one populated counterparty column (`merchant_id`, `biller_id`, or `destination_account_id`) depending on its type — never all three, never none.
 
 ## Technology stack
 
-* Azure Databricks
-* Unity Catalog
-* Databricks Volumes
-* PySpark
-* Auto Loader (`cloudFiles`)
-* Delta Lake merge-based upserts
-* dbt for SQL transformations, testing, and snapshots
-* Metabase for downstream analytics and reporting
+- **Azure Databricks** — Serverless compute (notebooks, SQL warehouse, dbt task), Unity Catalog, Volumes
+- **PySpark** — synthetic data generation, Auto Loader (`cloudFiles`) streaming ingestion
+- **Delta Lake** — `MERGE`-based upserts for Bronze
+- **dbt** (`dbt-databricks`) — staging models, snapshots, marts, schema tests — runs as a native Databricks Workspace-sourced task, no local install
+- **Metabase** — Models, Metrics, dashboards, public sharing
 
 ## Repository structure
 
@@ -91,171 +116,87 @@ Databricks-ELT-Pipeline/
             └── agg_revenue_by_type.sql
 ```
 
-## Data pipeline layers
+## Pipeline stages
 
 ### 1. Initialization
-
-The `init/1.0 init` notebook bootstraps the project environment by creating:
-
-* Catalog: `main`
-* Schemas: `main.bronze`, `main.silver`, `main.gold`
-* Landing volume: `main.default.landing_zone`
+`init/1.0 init` creates `main` catalog, `bronze`/`silver`/`gold` schemas, and the `main.default.landing_zone` Volume.
 
 ### 2. Landing zone generation
+`generator/landing_zone_generator` writes synthetic data across realistic formats — Parquet (customers, accounts), CSV (merchants, billers), JSON (transactions) — driven by a job widget (`is_incremental: true/false`) so the same notebook handles both the one-time historical backfill and every daily run after.
 
-The `generator/landing_zone_generator` notebook creates synthetic fintech data in multiple raw formats to mimic realistic ingestion scenarios:
+### 3. Bronze ingestion
+`el/landing_to_bronze` ingests via Auto Loader for the tables that receive incremental updates (customers, accounts, transactions), applying a `MERGE` in `foreachBatch` keyed on the business ID so Bronze always reflects current state rather than an ever-growing duplicate log. Static/current-state sources (merchants, billers, commission rules) use a straightforward `CREATE OR REPLACE`.
 
-* Customers: Parquet
-* Accounts: Parquet
-* Merchants: CSV
-* Billers: CSV
-* Commission rules: Parquet
-* Transactions: JSON
+### 4. Silver — dbt staging
+Standardizes casing, trims text, casts types, and derives flags (`has_card`, `is_online`) on top of every Bronze source. Materialized as views.
 
-The generator supports both:
+### 5. Gold — dbt marts
+Dimensions, a fully enriched `fact_transactions` (joined to the commission snapshot on valid date range to compute `commission_amount` and `net_amount`), the `commission_rules_snapshot` (SCD2, via `dbt snapshot`), and pre-aggregated daily/channel/type revenue marts.
 
-* Historical bootstrap loads for initial backfill
-* Daily incremental runs for new records and updates
+### 6. Reporting — Metabase
+Curated Models sit on top of Gold (never queried raw), organized into collections: base entity models, aggregate rollups (bills, purchases, transfers, overall), and native Metabase Metrics for reusable KPIs. Dashboards are shared via public, no-login links.
 
-Examples of incremental behavior implemented in the notebook include:
+## Data quality
 
-* New customer and account creation
-* Customer profile updates and account status changes
-* Commission rule repricing over time
-* New daily transactions and resolution of pending transactions
+dbt schema tests enforce trust in the pipeline at every layer:
 
-### 3. Bronze layer ingestion
+- `unique` / `not_null` on every primary business key
+- `relationships` tests across facts and dimensions
+- `accepted_values` on every bounded domain — `transaction_type`, `status`, `channel`, `account_type`, `account_status`, `kyc_status`, `country_code`
 
-The `el/landing_to_bronze` notebook ingests landing-zone files into `main.bronze`.
+A custom `generate_schema_name` macro ensures models land in the intended `silver`/`gold` schemas instead of dbt's default concatenated naming.
 
-For customers, accounts, and transactions, the notebook uses streaming reads with `cloudFiles` and applies merge-based upserts into Delta tables via `foreachBatch`. This enables deduplication by business key and keeps the latest record using `updated_at`.
+## How to run
 
-For reference datasets such as merchants, billers, and commission rules, the notebook creates or replaces Bronze tables directly from the landed files.
-
-Bronze tables created by the project include:
-
-* `main.bronze.raw_customers`
-* `main.bronze.raw_accounts`
-* `main.bronze.raw_transactions`
-* `main.bronze.raw_merchants`
-* `main.bronze.raw_billers`
-* `main.bronze.raw_commission_rules`
-
-### 4. Silver layer with dbt staging models
-
-The dbt project maps Bronze sources into cleaned staging models in the Silver schema. These models standardize casing, trim text fields, cast data types, and derive useful flags such as whether a transaction is online or card-based.
-
-Silver models include:
-
-* `stg_customers`
-* `stg_accounts`
-* `stg_merchants`
-* `stg_billers`
-* `stg_transactions`
-
-The project configures staging models as views in the Silver layer.
-
-### 5. Gold layer with marts and analytics models
-
-The Gold layer contains business-ready data models for analytics and BI consumption.
-
-Core models:
-
-* Dimensions: `dim_customers`, `dim_accounts`, `dim_merchants`, `dim_billers`
-* Fact table: `fact_transactions`
-* Snapshot: `commission_rules_snapshot`
-* Aggregates: `agg_daily_revenue`, `agg_revenue_by_channel`, `agg_revenue_by_type`
-
-The `fact_transactions` model enriches transactions with merchant and biller scope attributes, joins to commission rules through a dbt snapshot, and calculates:
-
-* `commission_amount`
-* `net_amount`
-
-This makes the Gold layer especially useful for revenue analytics, operational monitoring, and reporting.
-
-## Data quality and modeling practices
-
-The dbt project includes schema tests to improve trust in the pipeline, including:
-
-* `unique` and `not_null` tests on primary business keys
-* `relationships` tests across dimensions and facts
-* `accepted_values` tests for domains such as transaction status, transaction type, account type, account status, channel, KYC status, and country code
-
-The project also uses a custom `generate_schema_name` macro so dbt can write models into the intended Medallion schemas instead of defaulting to the target schema name.
-
-## Reporting and BI integration
-
-After the Medallion architecture is built, the curated Gold models are integrated with Metabase for reporting and dashboarding.
-
-Metabase is the presentation layer for this project and can consume Gold tables such as:
-
-* `fact_transactions`
-* `agg_daily_revenue`
-* `agg_revenue_by_channel`
-* `agg_revenue_by_type`
-* Customer and account dimensions for drill-down analysis
-
-This enables use cases such as:
-
-* Daily revenue tracking
-* Revenue breakdown by channel and transaction type
-* Settlement and transaction performance monitoring
-* Customer, merchant, and biller level analytics
-
-## How to run the project
-
-### Step 1: Initialize the environment
-
-Run the `init/1.0 init` notebook to create the required catalog objects and landing volume.
-
-### Step 2: Generate landing-zone data
-
-Run the `generator/landing_zone_generator` notebook.
-
-Use the `is_incremental` widget to switch between:
-
-* `false` for initial historical bootstrap
-* `true` for daily incremental simulation
-
-### Step 3: Load Bronze tables
-
-Run the `el/landing_to_bronze` notebook to ingest raw files from the landing zone into the Bronze schema.
-
-### Step 4: Build Silver and Gold with dbt
-
-From the `fintech_dwh` dbt project, execute the standard dbt workflow:
-
-```bash
-dbt snapshot
-dbt run
-dbt test
+```text
+1. Run init/1.0 init                          → provisions catalog, schemas, volume
+2. Run generator/landing_zone_generator        → is_incremental=false for backfill, true after
+3. Run el/landing_to_bronze                    → Auto Loader + merge into main.bronze
+4. From fintech_dwh, run: dbt snapshot && dbt run && dbt test
+5. Connect Metabase to the Databricks SQL Warehouse, point at main.gold
 ```
 
-The profile is configured for Databricks SQL and expects an access token through the `DBT_ACCESS_TOKEN` environment variable.
+In production, steps 2–4 are chained into a single scheduled Databricks Workflows job — see `docs/screenshots/workflow-dag.png`.
 
-### Step 5: Connect Metabase
+## Screenshots
 
-Point Metabase to the curated Databricks tables in the Gold layer and build dashboards on top of the aggregate and fact models.
+| | |
+|---|---|
+| **Unity Catalog structure** ![Catalog](docs/screenshots/catalog-explorer.png) | **Landing zone volume** ![Landing](docs/screenshots/landing-volume.png) |
+| **Auto Loader ingestion** ![Streaming](docs/screenshots/autoloader-streaming.png) | **dbt test suite passing** ![Tests](docs/screenshots/dbt-test-pass.png) |
+| **dbt lineage graph** ![Lineage](docs/screenshots/dbt-lineage.png) | **Orchestration DAG** ![Workflow](docs/screenshots/workflow-dag.png) |
+| **Commission rate history** ![Commission](docs/screenshots/metabase-commission.png) | **Revenue dashboard** ![Revenue](docs/screenshots/metabase-revenue.png) |
 
-## Example analytical outputs
+*(Replace the paths above with your actual screenshot files under `docs/screenshots/`.)*
 
-The project is designed to power reporting outputs such as:
+## Data scale
 
-* Daily commission revenue trends
-* Gross vs. net transaction value over time
-* Channel-level revenue contribution
-* Transaction-type revenue mix
-* Customer and account activity summaries
+| Metric | Volume |
+|---|---|
+| Customers (seeded) | ~100,000 |
+| Accounts (seeded) | ~150,000 |
+| Merchants | 5,000 |
+| Billers | 300 |
+| Transactions (initial backfill) | 1,000,000, spread across 365 days of history |
+| New transactions per day | 60,000 |
+| dbt schema tests | 28+ across staging and marts |
 
-## Why this project stands out
+## Engineering notes
 
-This project goes beyond a basic Medallion demo by combining:
+A few real bugs surfaced and fixed during development, kept here because working through them is the actual point of a portfolio project:
 
-* Multi-format raw ingestion
-* Incremental data simulation
-* Streaming-style Bronze ingestion with merge logic
-* dbt-based transformation, testing, and snapshotting
-* Business-ready Gold marts
-* Metabase integration for real reporting consumption
+- **Referential integrity under ID scheme drift** — once accounts started getting incremental date-based IDs alongside the original sequential ones, generating `account_id` as a padded random number produced orphaned foreign keys. Fixed by sampling real IDs via join instead of regenerating them.
+- **Same-day ID collisions** — running a backfill and an incremental pass on the same calendar day produced colliding `transaction_id`s (both keyed off just the date). Fixed with a run-timestamp seed instead of a date-only seed.
+- **Flat backfill dates** — the initial "historical" backfill was landing every row on the current date instead of spreading across real history. Fixed by distributing `created_at` across a configurable window, with status realism (only same-day rows can be `PENDING`; older rows are already resolved).
+- **dbt schema name concatenation** — dbt's default behavior namespaces custom schemas under the profile's target schema (`silver_silver` instead of `silver`). Fixed with a custom `generate_schema_name` macro.
 
-It is a strong portfolio project for demonstrating practical data engineering and analytics engineering skills on Databricks.
+## Roadmap
+
+- [ ] Extend `fact_transactions` commission matching to scope on `mcc_code`/`biller_category`, not just `transaction_type`
+- [ ] Add a `dim_date` calendar table for cleaner BI-side date filtering
+- [ ] Row-level fraud/anomaly scoring as a downstream dbt model (kept deliberately out of the raw layer)
+- [ ] CI pipeline (GitHub Actions) running `dbt test` on every PR against a dev schema
+
+---
+
+Built as an end-to-end data engineering portfolio project — synthetic data generation, medallion architecture, dbt transformation and testing, and BI delivery, all on Azure Databricks Serverless.
